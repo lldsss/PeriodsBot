@@ -2,7 +2,8 @@ import calendar
 import sqlite3
 from datetime import date, timedelta
 
-MASHA = 1842996053
+# MASHA = 1842996053
+MASHA = 8651332701
 PARTNER = 1307205193
 
 
