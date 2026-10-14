@@ -4,11 +4,16 @@ import json
 import os
 import sqlite3
 from collections import Counter
+from contextvars import ContextVar
+from pathlib import Path
 from datetime import date, datetime, timedelta
 from statistics import mean, median
 
-# Preserve the account selected by the owner in the existing deployment.
-MASHA = int(os.environ.get('MASHA_ID', '1842996053'))
+# Fixed roles: an old MASHA_ID setting must not turn the test account into Masha.
+MASHA = 1842996053
+TEST_USER = 8651332701
+WRITERS = (MASHA, TEST_USER)
+current_user = ContextVar('diary_user', default=MASHA)
 PARTNER = int(os.environ.get('PARTNER_ID', '1307205193'))
 
 
@@ -218,3 +223,41 @@ class Store:
         with self.db:
             self._snapshot(f'удаление записей за {day}')
             self.db.execute('DELETE FROM events WHERE day=?', (day,))
+
+
+class DiaryStores:
+    """Route each update to its owner's database using task-local context.
+
+    The partner reads Masha's diary. The test database never contains Masha's
+    entries, settings, periods or undo snapshots, even when numeric IDs match.
+    """
+    def __init__(self, main_path, test_path=None):
+        if PARTNER in WRITERS:
+            raise ValueError('PARTNER_ID должен отличаться от ID Маши и тестового аккаунта.')
+        if str(main_path)==':memory:':
+            test_path=test_path or ':memory:'
+        else:
+            main_path=Path(main_path)
+            test_path=Path(test_path) if test_path else main_path.with_name(f'{main_path.stem}.test-{TEST_USER}{main_path.suffix}')
+            if main_path.resolve()==test_path.resolve() or (main_path.exists() and test_path.exists() and main_path.samefile(test_path)):
+                raise ValueError('Основной и тестовый дневники должны использовать разные файлы базы.')
+            main_path.parent.mkdir(parents=True,exist_ok=True)
+            test_path.parent.mkdir(parents=True,exist_ok=True)
+        self._stores={MASHA:Store(main_path)}
+        try:
+            self._stores[TEST_USER]=Store(test_path)
+        except Exception:
+            self._stores[MASHA].db.close()
+            raise
+
+    def for_user(self,user_id):
+        if user_id not in (MASHA, TEST_USER, PARTNER):
+            raise ValueError('Доступ закрыт.')
+        return self._stores[TEST_USER if user_id==TEST_USER else MASHA]
+
+    def __getattr__(self,name):
+        return getattr(self.for_user(current_user.get()),name)
+
+    def close(self):
+        for diary in self._stores.values():
+            diary.db.close()

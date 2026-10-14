@@ -13,7 +13,7 @@ def reminder_keyboard():
     ])
 
 
-async def tick(bot, store, now):
+async def tick(bot, store, now, recipient=MASHA):
     if store.get_setting('reminder_enabled','no') != 'yes':
         return False
     snooze = store.get_setting('reminder_snooze','')
@@ -27,7 +27,8 @@ async def tick(bot, store, now):
     if retry and datetime.fromisoformat(retry) > now:
         return False
     try:
-        await bot.send_message(MASHA, 'Маша, как ты сегодня? 🐷🌷\nЗаглянем в дневничок?', reply_markup=reminder_keyboard())
+        text='Маша, как ты сегодня? 🐷🌷\nЗаглянем в дневничок?' if recipient==MASHA else 'Тестовое напоминание 🐷🌷\nЗаглянем в твой дневничок?'
+        await bot.send_message(recipient, text, reply_markup=reminder_keyboard())
     except TelegramAPIError:
         store.set_setting('reminder_retry',(now+timedelta(minutes=5)).isoformat())
         return False
@@ -37,7 +38,8 @@ async def tick(bot, store, now):
     return True
 
 
-async def run(bot, store, timezone):
+async def run(bot, stores, timezone):
     while True:
-        await tick(bot,store,datetime.now(timezone))
+        for recipient, diary in stores.items():
+            await tick(bot,diary,datetime.now(timezone),recipient)
         await asyncio.sleep(30)

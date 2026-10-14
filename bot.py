@@ -18,7 +18,7 @@ from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.types import (BotCommand, BufferedInputFile, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, MenuButtonCommands, Message)
 
-from storage import MASHA, PARTNER, Store
+from storage import MASHA, PARTNER, TEST_USER, WRITERS, DiaryStores, current_user
 from visuals import MONTHS, calendar_image, pain_chart
 import reminders
 
@@ -51,13 +51,17 @@ class Access(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = event.from_user
         chat = event.chat if isinstance(event, Message) else getattr(event.message, 'chat', None)
-        if not user or user.id not in (MASHA, PARTNER) or not chat or chat.type != 'private':
+        if not user or user.id not in (MASHA, PARTNER, TEST_USER) or not chat or chat.type != 'private':
             if isinstance(event, CallbackQuery):
                 await event.answer('Доступ закрыт', show_alert=True)
             elif chat and chat.type == 'private':
-                await event.answer('Этот бот доступен только двум владельцам.')
+                await event.answer('Этот бот доступен только разрешённым аккаунтам.')
             return
-        return await handler(event, data)
+        token=current_user.set(user.id)
+        try:
+            return await handler(event, data)
+        finally:
+            current_user.reset(token)
 
 
 dp.message.outer_middleware(Access())
@@ -100,7 +104,7 @@ def keyboard(items, columns=1):
 
 def menu(user):
     items = [('📅 Календарик','menu:calendar'), ('💌 Записи','menu:day'), ('📊 Статистика','menu:stats'), ('🌙 Прогноз','menu:forecast')]
-    if user == MASHA:
+    if user in WRITERS:
         items = [('🐷 Добавить запись','menu:record'), ('🌸 Месячные','menu:period')] + items + [
             ('✏️ Исправить запись','menu:edit'), ('↩️ Отменить последнее','menu:undo'),
             ('⏰ Напоминания','menu:reminders'), ('💕 Обмен','menu:share')]
@@ -112,7 +116,7 @@ def is_write_action(action):
 
 
 def allowed(user, action):
-    return user == MASHA or not is_write_action(action)
+    return user in WRITERS or not is_write_action(action)
 
 
 def day_shortcuts(action):
@@ -141,7 +145,15 @@ def date_picker(month, action):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def sharing_text(user):
+    if user==TEST_USER:
+        return 'Тестовый режим 🧪 Все функции доступны в отдельном дневнике. Партнёр не получает уведомлений и не видит эти записи. Напоминания приходят только тебе.'
+    return SHARING_TEXT
+
+
 async def notify(api, text):
+    if current_user.get()==TEST_USER:
+        return None
     try:
         await api.send_message(PARTNER,text)
         return True
@@ -151,7 +163,7 @@ async def notify(api, text):
 
 async def changed(message, text):
     delivered = await notify(message.bot, text)
-    if not delivered:
+    if delivered is False:
         await message.answer('Запись сохранена, но уведомление не доставлено. Партнёру нужно открыть бота и нажать /start; также проверьте соединение.')
 
 
@@ -201,7 +213,7 @@ async def show_form(message,state,day,kind,edit=None):
 async def save(message,state,value):
     data=await state.get_data()
     if not data.get('kind'):
-        await message.answer('Открой запись заново.',reply_markup=menu(MASHA))
+        await message.answer('Открой запись заново.',reply_markup=menu(current_user.get()))
         return
     if not 1<=len(value)<=1500 or (data['kind'] in ('Боль','Месячные') and value not in OPTIONS[data['kind']]):
         await message.answer('Выбери допустимый вариант или введи текст до 1500 символов.',reply_markup=form_keyboard(data))
@@ -226,19 +238,19 @@ async def show_day(message,day,user,action='day',offset=0):
     periods=[p for p in store.periods() if p['start']<=day<=(p['end'] or today())]
     for p in periods:
         text=f'🌸 Месячные с {pretty(p["start"])}'+(f' по {pretty(p["end"])}' if p['end'] else ' · ещё идут')
-        controls=keyboard([('Исправить период',f'period:{p["id"]}')]) if user==MASHA else None
+        controls=keyboard([('Исправить период',f'period:{p["id"]}')]) if user in WRITERS else None
         await message.answer(text,reply_markup=controls)
     for e in entries[offset:offset+5]:
-        controls=keyboard([('✏️ Изменить',f'event:{e["id"]}'),('🗑 Удалить',f'ask:event:{e["id"]}')],2) if user==MASHA else None
+        controls=keyboard([('✏️ Изменить',f'event:{e["id"]}'),('🗑 Удалить',f'ask:event:{e["id"]}')],2) if user in WRITERS else None
         await message.answer(f'{e["time"] or "Время не указано"} · {e["kind"]}\n{e["value"]}',reply_markup=controls)
     items=[]
     if offset:
         items.append(('‹ Назад',f'page:{action}:{day}:{max(0,offset-5)}'))
     if offset+5<len(entries):
         items.append(('Дальше ›',f'page:{action}:{day}:{offset+5}'))
-    if action=='delete' and user==MASHA and entries:
+    if action=='delete' and user in WRITERS and entries:
         items.append(('Удалить все записи этого дня',f'ask:day:{day}'))
-    if user==MASHA:
+    if user in WRITERS:
         items.append(('Добавить запись',f'd:record:{day}'))
     items.append(('Другой день',f'menu:{action}'))
     if not entries and not periods:
@@ -333,12 +345,12 @@ async def show_stats(message):
     text+='\n'+store.forecast(today())
     await message.answer(text)
     image=await asyncio.to_thread(pain_chart,stats)
-    await message.answer_photo(BufferedInputFile(image,filename='pain.png'),caption='Средняя боль за день. Пропуски не заменяются нулями.',reply_markup=menu(MASHA if message.chat.id==MASHA else PARTNER))
+    await message.answer_photo(BufferedInputFile(image,filename='pain.png'),caption='Средняя боль за день. Пропуски не заменяются нулями.',reply_markup=menu(message.chat.id))
 
 
 async def reminder_panel(message):
     enabled=store.get_setting('reminder_enabled','no')=='yes'
-    await message.answer(f'⏰ Напоминания {"включены" if enabled else "выключены"}.\nВремя: {store.get_setting("reminder_time","21:00")} ({tz.key}). Только для Маши.',reply_markup=keyboard([
+    await message.answer(f'⏰ Напоминания {"включены" if enabled else "выключены"}.\nВремя: {store.get_setting("reminder_time","21:00")} ({tz.key}). Только для твоего аккаунта.',reply_markup=keyboard([
         ('Выключить' if enabled else 'Включить','remind:off' if enabled else 'remind:on'),
         ('09:00','remind:09:00'),('18:00','remind:18:00'),('21:00','remind:21:00'),
         ('Своё время','remind:custom'),('🐷 Главное меню','menu:start')],2))
@@ -350,7 +362,7 @@ async def perform_command(message,state,command,user,arg=None):
         await message.answer('Изменять дневник может только Маша.')
         return
     if command=='start':
-        await message.answer('🐷🌷 Машин хрю-дневничок\n'+SHARING_TEXT,reply_markup=menu(user))
+        await message.answer(('🐷 Тестовый хрю-дневничок\n' if user==TEST_USER else '🐷🌷 Машин хрю-дневничок\n')+sharing_text(user),reply_markup=menu(user))
     elif command in ('record','day','edit','delete'):
         if arg:
             await select_date(message,state,command,arg,user)
@@ -365,7 +377,7 @@ async def perform_command(message,state,command,user,arg=None):
     elif command=='forecast':
         await message.answer(store.forecast(today()),reply_markup=menu(user))
     elif command=='share':
-        await message.answer(SHARING_TEXT)
+        await message.answer(sharing_text(user))
     elif command=='reminders':
         await reminder_panel(message)
     elif command=='undo':
@@ -404,7 +416,7 @@ async def callbacks(query:CallbackQuery,state:FSMContext):
     user=query.from_user.id
     message=query.message
     read_only=head in ('noop','cal','menu') or (head in ('d','m','page') and len(parts)>1 and parts[1]=='day')
-    if user!=MASHA and not read_only:
+    if user not in WRITERS and not read_only:
         await message.answer('Изменять дневник может только Маша.')
         return
     try:
@@ -554,7 +566,7 @@ async def reminder_action(message,state,parts):
 
 @dp.message(Entry.clock)
 async def clock_text(message:Message,state:FSMContext):
-    if message.from_user.id!=MASHA: return
+    if message.from_user.id not in WRITERS: return
     try:
         await set_event_time(message,state,(message.text or '').strip())
     except ValueError as exc:
@@ -563,7 +575,7 @@ async def clock_text(message:Message,state:FSMContext):
 
 @dp.message(Entry.reminder_time)
 async def reminder_text(message:Message,state:FSMContext):
-    if message.from_user.id!=MASHA: return
+    if message.from_user.id not in WRITERS: return
     value=(message.text or '').strip()
     if not valid_time(value):
         await message.answer('Введи время ЧЧ:ММ, например 20:30, или /cancel.')
@@ -576,7 +588,7 @@ async def reminder_text(message:Message,state:FSMContext):
 
 @dp.message(Entry.value)
 async def text_value(message:Message,state:FSMContext):
-    if message.from_user.id!=MASHA: return
+    if message.from_user.id not in WRITERS: return
     value=(message.text or '').strip()
     if not value or value.startswith('/') or len(value)>1500:
         await message.answer('Пришли текст от 1 до 1500 символов или /cancel.')
@@ -598,7 +610,7 @@ async def text_value(message:Message,state:FSMContext):
             await save(message,state,value)
         except ValueError as exc:
             await state.clear()
-            await message.answer(str(exc),reply_markup=menu(MASHA))
+            await message.answer(str(exc),reply_markup=menu(current_user.get()))
 
 
 async def configure_commands(api):
@@ -615,18 +627,18 @@ async def main():
     os.umask(0o077)
     path=Path(os.environ.get('BOT_DB','data/diary.sqlite3'))
     path.parent.mkdir(parents=True,exist_ok=True)
-    store=Store(path)
+    store=DiaryStores(path,os.environ.get('BOT_TEST_DB'))
     api=Bot(token)
     task=None
     try:
         await configure_commands(api)
-        task=asyncio.create_task(reminders.run(api,store,tz))
+        task=asyncio.create_task(reminders.run(api,{owner:store.for_user(owner) for owner in WRITERS},tz))
         await dp.start_polling(api,allowed_updates=dp.resolve_used_update_types())
     finally:
         if task:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError): await task
-        store.db.close()
+        store.close()
         await api.session.close()
 
 
