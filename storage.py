@@ -43,7 +43,7 @@ class Store:
         records = self.db.execute('SELECT day, kind, value FROM entries WHERE day LIKE ?', (month + '-%',)).fetchall()
         marks = {}
         for day, kind, value in records:
-            if kind in ('Месячные', 'Близость', 'Секс') and value == 'Да':
+            if (kind == 'Месячные' and value == 'Да') or (kind in ('Близость', 'Секс') and value.strip().casefold() not in ('', 'нет')):
                 marks.setdefault(int(day[-2:]), set()).add({'Месячные': 'М', 'Близость': 'Б', 'Секс': 'С'}[kind])
         lines = [month, 'Пн     Вт     Ср     Чт     Пт     Сб     Вс']
         for week in calendar.monthcalendar(first.year, first.month):

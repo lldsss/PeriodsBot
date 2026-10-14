@@ -1,7 +1,8 @@
 import asyncio
+import calendar
 import logging
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from html import escape
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -22,6 +23,8 @@ OPTIONS = {
     'Настроение': ['Хорошее', 'Спокойное', 'Грустное', 'Тревожное', 'Раздражённое'],
     'Самочувствие': ['Отличное', 'Нормальное', 'Плохое'],
 }
+BINARY = {'Месячные'}
+MONTHS = ('Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь')
 dp = Dispatcher()
 store = None
 tz = None
@@ -55,7 +58,7 @@ def keyboard(items):
 def menu(user_id):
     items = [('Календарик 🌸', 'menu:calendar'), ('Записи сегодня 💌', 'menu:day'), ('Мой цикл 🌙', 'menu:forecast')]
     if user_id == MASHA:
-        items.insert(0, ('Как я сегодня? 🎀', 'menu:record'))
+        items.insert(0, ('Добавить запись 🎀', 'menu:record'))
         items.append(('Делиться с любимым 💕', 'menu:share'))
     return keyboard(items)
 
@@ -86,7 +89,7 @@ async def start(message: Message, state: FSMContext):
     await state.clear()
     if message.from_user.id == MASHA:
         await message.answer('Маша, привет! Я твой хрю-дневничок 🐷🌷\n'
-            '/record — запись за сегодня\n/record ГГГГ-ММ-ДД — за другой день\n'
+            '/record — добавить запись: выбери день кнопками\n'
             '/day [ГГГГ-ММ-ДД] — записи дня\n/calendar [ГГГГ-ММ] — календарь\n'
             '/forecast — приблизительный прогноз\n/share — управление обменом\n'
             '/delete ГГГГ-ММ-ДД — удалить день\n/erase — удалить весь дневник\n/cancel — отмена\n\n'
@@ -106,7 +109,9 @@ async def menu_action(query: CallbackQuery, state: FSMContext):
     await query.answer()
     await state.clear()
     message = query.message.model_copy(update={'from_user': query.from_user, 'text': '/' + command}).as_(query.bot)
-    if command == 'record':
+    if command == 'home':
+        await message.answer('🐷🌷 Хрю-дневничок', reply_markup=menu(query.from_user.id))
+    elif command == 'record':
         await record(message, state)
     elif command == 'share':
         await share(message)
@@ -139,18 +144,95 @@ async def set_share(query: CallbackQuery):
     await query.message.answer('Обмен включён.' if store.sharing() else 'Обмен выключен. Доступ партнёра к дневнику закрыт.')
 
 
+def date_label(day):
+    return date.fromisoformat(day).strftime('%d.%m.%Y')
+
+
+def day_shortcuts():
+    current = date.fromisoformat(today())
+    return keyboard([
+        ('Сегодня 🌷', f'pick:{current.isoformat()}'),
+        ('Вчера 🌙', f'pick:{(current - timedelta(days=1)).isoformat()}'),
+        ('Другой день 📅', f'pickmonth:{current:%Y-%m}'),
+        ('Главное меню', 'menu:home'),
+    ])
+
+
+def date_picker(month):
+    first = date.fromisoformat(month + '-01')
+    current = date.fromisoformat(today())
+    rows = [[InlineKeyboardButton(text=f'{MONTHS[first.month - 1]} {first.year}', callback_data='picknoop')],
+            [InlineKeyboardButton(text=d, callback_data='picknoop') for d in ('Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс')]]
+    for week in calendar.monthcalendar(first.year, first.month):
+        row = []
+        for number in week:
+            day = first.replace(day=number) if number else None
+            enabled = day is not None and day <= current
+            row.append(InlineKeyboardButton(text=str(number) if enabled else '·',
+                       callback_data=f'pick:{day.isoformat()}' if enabled else 'picknoop'))
+        rows.append(row)
+    offset = first.year * 12 + first.month - 1
+    navigation = []
+    for delta, label in ((-1, '‹'), (1, '›')):
+        year, month_index = divmod(offset + delta, 12)
+        if 1 <= year <= 9999 and (year, month_index + 1) <= (current.year, current.month):
+            navigation.append(InlineKeyboardButton(text=label, callback_data=f'pickmonth:{year:04d}-{month_index + 1:02d}'))
+    rows.append(navigation)
+    rows.append([InlineKeyboardButton(text='🐷 Назад', callback_data='menu:record')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def categories(message, day):
+    await message.answer(f'🐽 Запись за {date_label(day)}. Что отметим? 🌸',
+        reply_markup=keyboard([(label, f'kind:{day}:{i}') for i, label in enumerate(LABELS)] +
+                              [('Выбрать другой день 📅', 'menu:record'), ('Главное меню', 'menu:home')]))
+
+
 @dp.message(Command('record'))
 async def record(message: Message, state: FSMContext):
     if message.from_user.id != MASHA:
         return
     await state.clear()
-    try:
-        parts = message.text.split()
-        day = parse_day(parts[1]) if len(parts) > 1 else today()
-    except ValueError:
-        await message.answer('Укажи прошедшую или сегодняшнюю дату: /record ГГГГ-ММ-ДД')
+    parts = message.text.split()
+    if len(parts) > 1:
+        try:
+            day = parse_day(parts[1])
+        except ValueError:
+            pass
+        else:
+            await categories(message, day)
+            return
+    await message.answer('🐷 За какой день добавим запись?', reply_markup=day_shortcuts())
+
+
+@dp.callback_query(F.data.startswith('pickmonth:'))
+async def pick_month(query: CallbackQuery, state: FSMContext):
+    if query.from_user.id != MASHA:
+        await query.answer('Записи доступны только Маше.')
         return
-    await message.answer(f'Запись за {day}. 🐽 Выбери категорию 🌸:', reply_markup=keyboard([(label, f'kind:{day}:{i}') for i, label in enumerate(LABELS)]))
+    await state.clear()
+    await query.answer()
+    await query.message.edit_text('🐷 Выбери день в календарике 🌸', reply_markup=date_picker(query.data.split(':')[1]))
+
+
+@dp.callback_query(F.data == 'picknoop')
+async def pick_noop(query: CallbackQuery):
+    await query.answer()
+
+
+@dp.callback_query(F.data.startswith('pick:'))
+async def pick_day(query: CallbackQuery, state: FSMContext):
+    if query.from_user.id != MASHA:
+        await query.answer('Записи доступны только Маше.')
+        return
+    try:
+        day = parse_day(query.data.split(':')[1])
+    except ValueError:
+        await query.answer('Выбери сегодняшний или прошедший день.')
+        return
+    await state.clear()
+    await query.answer()
+    await categories(query.message, day)
 
 
 @dp.callback_query(F.data.startswith('kind:'))
@@ -164,20 +246,31 @@ async def kind(query: CallbackQuery, state: FSMContext):
     await state.update_data(day=day, kind=label)
     choices = OPTIONS.get(label, [])
     await query.answer()
-    await query.message.answer(f'{label}, {day}: отправь текст (до 1500 символов) или выбери значение. '
-                               'Несколько симптомов можно перечислить через запятую. Повторная запись категории заменяет прежнюю.',
-                               reply_markup=keyboard([(v, f'value:{day}:{index}:{i}') for i, v in enumerate(choices)]) if choices else None)
+    if label in BINARY:
+        prompt = 'Нажми «Да» или «Нет» ниже 🐷'
+    elif label in ('Секс', 'Близость'):
+        prompt = 'Выбери «Да»/«Нет» или напиши своими словами (до 1500 символов) 💕\nТекстовая запись отмечается в календаре как событие. Если события не было, выбери «Нет».'
+    elif label == 'Симптомы':
+        prompt = 'Выбери симптом или напиши несколько через запятую (до 1500 символов).'
+    elif label == 'Заметка':
+        prompt = 'Напиши, что хочется сохранить в дневничке (до 1500 символов) 💌'
+    else:
+        prompt = 'Выбери вариант или опиши своими словами (до 1500 символов) 🌷'
+    await query.message.answer(f'{label} · {date_label(day)}\n{prompt}\nПовторная запись заменит прежнюю.',
+        reply_markup=keyboard([(v, f'value:{day}:{index}:{i}') for i, v in enumerate(choices)] +
+                              [('Назад к категориям', f'pick:{day}')]))
 
 
 async def save(message, state, value):
     data = await state.get_data()
-    if data['kind'] in ('Месячные', 'Секс', 'Близость') and value not in ('Да', 'Нет'):
-        await message.answer('Для этой категории выбери «Да» или «Нет».')
+    if data['kind'] in BINARY and value not in ('Да', 'Нет'):
+        index = LABELS.index(data['kind'])
+        await message.answer('Нажми одну из кнопок 🐷', reply_markup=keyboard([(v, f"value:{data['day']}:{index}:{i}") for i, v in enumerate(OPTIONS[data['kind']])]))
         return
     store.put(data['day'], data['kind'], value)
     await state.clear()
     delivered = await notify(message.bot, f"Маша · {data['day']}\n{data['kind']}: {value}")
-    await message.answer('Хрю! Записала в твой дневничок 🐷💕' + (' Партнёру отправлено.' if delivered else ' Не удалось уведомить партнёра. Запись сохранена; проверьте, что он нажал /start, и соединение работает.' if delivered is False else ' Обмен выключен.'), reply_markup=menu(MASHA))
+    await message.answer('Хрю! Записала в твой дневничок 🐷💕' + (' Партнёру отправлено.' if delivered else ' Не удалось уведомить партнёра. Запись сохранена; проверьте, что он нажал /start, и соединение работает.' if delivered is False else ' Обмен выключен.'), reply_markup=keyboard([('Добавить ещё за этот день 🌸', f"pick:{data['day']}"), ('Выбрать другой день 📅', 'menu:record'), ('Главное меню', 'menu:home')]))
 
 
 @dp.callback_query(F.data.startswith('value:'))
