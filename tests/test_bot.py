@@ -163,3 +163,55 @@ class RecordFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('13БС', bot.store.calendar('2026-10'))
         bot.store.put('2026-10-13', 'Секс', 'нет')
         self.assertIn('13Б ', bot.store.calendar('2026-10'))
+
+    async def test_day_and_delete_offer_date_buttons(self):
+        for action in ('day', 'delete'):
+            m = AsyncMock()
+            m.from_user.id = MASHA
+            m.text = '/' + action
+            await (bot.read(m, self.state) if action == 'day' else bot.delete(m, self.state))
+            buttons = m.answer.call_args.kwargs['reply_markup'].inline_keyboard
+            self.assertEqual(buttons[0][0].callback_data, f'select:{action}:2026-10-14')
+            calendar = bot.date_picker('2026-10', action)
+            values = [b.callback_data for row in calendar.inline_keyboard for b in row]
+            self.assertIn(f'select:{action}:2026-10-13', values)
+            self.assertIn(f'selectmonth:{action}:2026-09', values)
+
+    async def test_selected_day_read_delete_confirmation_and_consent(self):
+        from unittest.mock import patch
+        message = Message(message_id=1, date=datetime.now(), chat=Chat(id=MASHA, type='private'), from_user=User(id=MASHA, is_bot=False, first_name='Test'))
+        bot.store.put('2026-10-13', 'Заметка', 'Личная запись')
+        q = self.query('select:day:2026-10-13')
+        q.message = message
+        with patch.object(Message, 'answer', new_callable=AsyncMock) as answer:
+            await bot.select_day(q, self.state)
+            self.assertTrue(any('Личная запись' in call.args[0] for call in answer.call_args_list))
+            q.data = 'select:delete:2026-10-13'
+            await bot.select_day(q, self.state)
+            self.assertIn('Удалить 13.10.2026?', answer.call_args.args[0])
+            self.assertEqual(bot.store.rows('2026-10-13'), [('Заметка', 'Личная запись')])
+        for action in ('day', 'delete'):
+            denied = self.query(f'select:{action}:2026-10-13', PARTNER)
+            await bot.select_day(denied, self.state)
+            denied.message.model_copy.assert_not_called()
+
+    async def test_pain_rating_validation_and_symptom_followup(self):
+        await self.state.set_state(bot.Entry.value)
+        await self.state.update_data(day='2026-10-13', kind='Симптомы')
+        m = AsyncMock()
+        await bot.save(m, self.state, 'Спазмы')
+        self.assertIn('от 1 до 10', m.answer.call_args.args[0])
+        await self.state.set_state(bot.Entry.value)
+        await self.state.update_data(day='2026-10-13', kind='Боль')
+        await bot.save(m, self.state, '11')
+        self.assertNotIn('Боль', dict(bot.store.rows('2026-10-13')))
+        await bot.save(m, self.state, '7')
+        self.assertIn(('Боль', '7'), bot.store.rows('2026-10-13'))
+        self.assertEqual(bot.OPTIONS['Боль'][:10], [str(n) for n in range(1, 11)])
+
+    async def test_telegram_command_registration(self):
+        api = AsyncMock()
+        await bot.configure_commands(api)
+        commands = api.set_my_commands.call_args.args[0]
+        self.assertEqual({c.command for c in commands}, {'start', 'record', 'day', 'calendar', 'forecast', 'share', 'delete', 'erase', 'cancel'})
+        api.set_chat_menu_button.assert_awaited_once()

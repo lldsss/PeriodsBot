@@ -12,17 +12,20 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BotCommand, MenuButtonCommands, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from storage import MASHA, PARTNER, Store
 
-LABELS = ['Месячные', 'Симптомы', 'Настроение', 'Самочувствие', 'Близость', 'Секс', 'Заметка']
+LABELS = ['Месячные', 'Симптомы', 'Настроение', 'Самочувствие', 'Близость', 'Секс', 'Заметка', 'Боль']
 OPTIONS = {
     'Месячные': ['Да', 'Нет'], 'Близость': ['Да', 'Нет'], 'Секс': ['Да', 'Нет'],
     'Симптомы': ['Нет симптомов', 'Спазмы', 'Головная боль', 'Вздутие', 'Боль в груди', 'Усталость'],
     'Настроение': ['Хорошее', 'Спокойное', 'Грустное', 'Тревожное', 'Раздражённое'],
     'Самочувствие': ['Отличное', 'Нормальное', 'Плохое'],
 }
+OPTIONS['Симптомы'] += ['Боль в пояснице', 'Боль внизу живота', 'Тошнота', 'Головокружение', 'Сонливость', 'Бессонница', 'Отёчность', 'Акне', 'Изменение аппетита', 'Тяга к сладкому', 'Запор', 'Диарея', 'Приливы', 'Озноб']
+OPTIONS['Настроение'] += ['Радостное', 'Нежное', 'Влюблённое', 'Энергичное', 'Вдохновлённое', 'Чувствительное', 'Плаксивое', 'Апатичное', 'Одинокое', 'Перепады настроения', 'Злое', 'Уверенное']
+OPTIONS['Боль'] = [str(n) for n in range(1, 11)] + ['Нет боли']
 BINARY = {'Месячные'}
 MONTHS = ('Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь')
 dp = Dispatcher()
@@ -56,10 +59,11 @@ def keyboard(items):
 
 
 def menu(user_id):
-    items = [('Календарик 🌸', 'menu:calendar'), ('Записи сегодня 💌', 'menu:day'), ('Мой цикл 🌙', 'menu:forecast')]
+    items = [('Календарик 🌸', 'menu:calendar'), ('Посмотреть записи 💌', 'menu:day'), ('Мой цикл 🌙', 'menu:forecast')]
     if user_id == MASHA:
         items.insert(0, ('Добавить запись 🎀', 'menu:record'))
         items.append(('Делиться с любимым 💕', 'menu:share'))
+        items.append(('Удалить записи дня', 'menu:delete'))
     return keyboard(items)
 
 
@@ -90,16 +94,16 @@ async def start(message: Message, state: FSMContext):
     if message.from_user.id == MASHA:
         await message.answer('Маша, привет! Я твой хрю-дневничок 🐷🌷\n'
             '/record — добавить запись: выбери день кнопками\n'
-            '/day [ГГГГ-ММ-ДД] — записи дня\n/calendar [ГГГГ-ММ] — календарь\n'
+            '/day — выбрать день и посмотреть записи\n/calendar — календарь\n'
             '/forecast — приблизительный прогноз\n/share — управление обменом\n'
-            '/delete ГГГГ-ММ-ДД — удалить день\n/erase — удалить весь дневник\n/cancel — отмена\n\n'
+            '/delete — выбрать день для удаления\n/erase — удалить весь дневник\n/cancel — отмена\n\n'
             'Обмен изначально выключен. Если включить его, партнёр получит новые записи и доступ ко всему дневнику. '
             'Уже отправленные сообщения останутся в его чате после отключения обмена или удаления записей. '
             'Данные хранятся на сервере бота; Telegram-боты не используют сквозное шифрование. '
             'При сильной боли, необычном кровотечении или резком ухудшении самочувствия обратись к врачу.')
     else:
         await message.answer('Привет! Когда Маша включит обмен, здесь будут её новые записи.\n'
-                             '/calendar [ГГГГ-ММ] — календарь\n/day [ГГГГ-ММ-ДД] — дневник\n/forecast — оценка следующего цикла')
+                             '/calendar — календарь\n/day — выбрать день дневника\n/forecast — оценка следующего цикла')
     await message.answer('🐷🌷 Хрю-дневничок · маленькая забота о себе', reply_markup=menu(message.from_user.id))
 
 
@@ -113,10 +117,12 @@ async def menu_action(query: CallbackQuery, state: FSMContext):
         await message.answer('🐷🌷 Хрю-дневничок', reply_markup=menu(query.from_user.id))
     elif command == 'record':
         await record(message, state)
+    elif command == 'delete':
+        await delete(message, state)
     elif command == 'share':
         await share(message)
     else:
-        await read(message)
+        await read(message, state)
 
 
 @dp.message(Command('cancel'))
@@ -148,17 +154,21 @@ def date_label(day):
     return date.fromisoformat(day).strftime('%d.%m.%Y')
 
 
-def day_shortcuts():
+def day_shortcuts(action="record"):
     current = date.fromisoformat(today())
+    prefix = "pick" if action == "record" else f"select:{action}"
+    month_prefix = "pickmonth" if action == "record" else f"selectmonth:{action}"
     return keyboard([
-        ('Сегодня 🌷', f'pick:{current.isoformat()}'),
-        ('Вчера 🌙', f'pick:{(current - timedelta(days=1)).isoformat()}'),
-        ('Другой день 📅', f'pickmonth:{current:%Y-%m}'),
+        ('Сегодня 🌷', f'{prefix}:{current.isoformat()}'),
+        ('Вчера 🌙', f'{prefix}:{(current - timedelta(days=1)).isoformat()}'),
+        ('Другой день 📅', f'{month_prefix}:{current:%Y-%m}'),
         ('Главное меню', 'menu:home'),
     ])
 
 
-def date_picker(month):
+def date_picker(month, action="record"):
+    prefix = "pick" if action == "record" else f"select:{action}"
+    month_prefix = "pickmonth" if action == "record" else f"selectmonth:{action}"
     first = date.fromisoformat(month + '-01')
     current = date.fromisoformat(today())
     rows = [[InlineKeyboardButton(text=f'{MONTHS[first.month - 1]} {first.year}', callback_data='picknoop')],
@@ -169,16 +179,16 @@ def date_picker(month):
             day = first.replace(day=number) if number else None
             enabled = day is not None and day <= current
             row.append(InlineKeyboardButton(text=str(number) if enabled else '·',
-                       callback_data=f'pick:{day.isoformat()}' if enabled else 'picknoop'))
+                       callback_data=f'{prefix}:{day.isoformat()}' if enabled else 'picknoop'))
         rows.append(row)
     offset = first.year * 12 + first.month - 1
     navigation = []
     for delta, label in ((-1, '‹'), (1, '›')):
         year, month_index = divmod(offset + delta, 12)
         if 1 <= year <= 9999 and (year, month_index + 1) <= (current.year, current.month):
-            navigation.append(InlineKeyboardButton(text=label, callback_data=f'pickmonth:{year:04d}-{month_index + 1:02d}'))
+            navigation.append(InlineKeyboardButton(text=label, callback_data=f'{month_prefix}:{year:04d}-{month_index + 1:02d}'))
     rows.append(navigation)
-    rows.append([InlineKeyboardButton(text='🐷 Назад', callback_data='menu:record')])
+    rows.append([InlineKeyboardButton(text='🐷 Назад', callback_data=f'menu:{action}')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -213,6 +223,45 @@ async def pick_month(query: CallbackQuery, state: FSMContext):
     await state.clear()
     await query.answer()
     await query.message.edit_text('🐷 Выбери день в календарике 🌸', reply_markup=date_picker(query.data.split(':')[1]))
+
+
+async def can_select(query, action):
+    if action not in ('day', 'delete') or (action == 'delete' and query.from_user.id != MASHA):
+        await query.answer('Доступ закрыт.')
+        return False
+    if query.from_user.id == PARTNER and not store.sharing():
+        await query.answer('Маша пока не включила обмен дневником.')
+        return False
+    return True
+
+
+@dp.callback_query(F.data.startswith('selectmonth:'))
+async def select_month(query: CallbackQuery, state: FSMContext):
+    _, action, month = query.data.split(':')
+    if not await can_select(query, action):
+        return
+    await state.clear()
+    await query.answer()
+    await query.message.edit_text('🐷 Выбери день 🌸', reply_markup=date_picker(month, action))
+
+
+@dp.callback_query(F.data.startswith('select:'))
+async def select_day(query: CallbackQuery, state: FSMContext):
+    _, action, value = query.data.split(':')
+    if not await can_select(query, action):
+        return
+    try:
+        day = parse_day(value)
+    except ValueError:
+        await query.answer('Выбери сегодняшний или прошедший день.')
+        return
+    await state.clear()
+    await query.answer()
+    message = query.message.model_copy(update={'from_user': query.from_user, 'text': f'/{action} {day}'}).as_(query.bot)
+    if action == 'day':
+        await read(message, state)
+    else:
+        await delete(message, state)
 
 
 @dp.callback_query(F.data == 'picknoop')
@@ -250,6 +299,8 @@ async def kind(query: CallbackQuery, state: FSMContext):
         prompt = 'Нажми «Да» или «Нет» ниже 🐷'
     elif label in ('Секс', 'Близость'):
         prompt = 'Выбери «Да»/«Нет» или напиши своими словами (до 1500 символов) 💕\nТекстовая запись отмечается в календаре как событие. Если события не было, выбери «Нет».'
+    elif label == 'Боль':
+        prompt = 'Оцени боль от 1 до 10: 1 — едва заметная, 10 — самая сильная. Нажми число или отправь его текстом. Если ничего не болит, выбери «Нет боли».'
     elif label == 'Симптомы':
         prompt = 'Выбери симптом или напиши несколько через запятую (до 1500 символов).'
     elif label == 'Заметка':
@@ -267,10 +318,15 @@ async def save(message, state, value):
         index = LABELS.index(data['kind'])
         await message.answer('Нажми одну из кнопок 🐷', reply_markup=keyboard([(v, f"value:{data['day']}:{index}:{i}") for i, v in enumerate(OPTIONS[data['kind']])]))
         return
+    if data['kind'] == 'Боль' and value not in OPTIONS['Боль']:
+        await message.answer('Выбери число от 1 до 10 или «Нет боли».', reply_markup=keyboard([(v, f"value:{data['day']}:{LABELS.index('Боль')}:{i}") for i, v in enumerate(OPTIONS['Боль'])]))
+        return
     store.put(data['day'], data['kind'], value)
     await state.clear()
     delivered = await notify(message.bot, f"Маша · {data['day']}\n{data['kind']}: {value}")
     await message.answer('Хрю! Записала в твой дневничок 🐷💕' + (' Партнёру отправлено.' if delivered else ' Не удалось уведомить партнёра. Запись сохранена; проверьте, что он нажал /start, и соединение работает.' if delivered is False else ' Обмен выключен.'), reply_markup=keyboard([('Добавить ещё за этот день 🌸', f"pick:{data['day']}"), ('Выбрать другой день 📅', 'menu:record'), ('Главное меню', 'menu:home')]))
+    if data['kind'] == 'Симптомы' and value != 'Нет симптомов':
+        await message.answer('Есть боль? Можешь оценить её от 1 до 10 🐷', reply_markup=keyboard([('Оценить боль', f"kind:{data['day']}:{LABELS.index('Боль')}"), ('Не сейчас', 'menu:home')]))
 
 
 @dp.callback_query(F.data.startswith('value:'))
@@ -288,7 +344,9 @@ async def choice(query: CallbackQuery, state: FSMContext):
 
 
 @dp.message(Command('day', 'calendar', 'forecast'))
-async def read(message: Message):
+async def read(message: Message, state: FSMContext = None):
+    if state is not None:
+        await state.clear()
     if message.from_user.id == PARTNER and not store.sharing():
         await message.answer('Маша пока не включила обмен дневником.')
         return
@@ -309,15 +367,18 @@ async def read(message: Message):
         elif command == '/forecast':
             await message.answer(store.forecast())
         else:
-            day = parse_day(parts[1]) if len(parts) > 1 else today()
+            if len(parts) == 1:
+                await message.answer('🐷 За какой день показать записи?', reply_markup=day_shortcuts('day'))
+                return
+            day = parse_day(parts[1])
             rows = store.rows(day)
-            await message.answer(day)
+            await message.answer(date_label(day))
             for label, value in rows:
                 await message.answer(f'{label}: {value}')
             if not rows:
                 await message.answer('Здесь пока пусто 🐷🌷')
     except ValueError:
-        await message.answer('Неверная дата. Формат: ГГГГ-ММ для календаря, ГГГГ-ММ-ДД для дня.')
+        await message.answer('Выбери день кнопками 🐷', reply_markup=day_shortcuts('day'))
 
 
 @dp.callback_query(F.data.startswith('month:'))
@@ -339,9 +400,9 @@ async def delete(message: Message, state: FSMContext):
         try:
             target = parse_day(parts[1])
         except (ValueError, IndexError):
-            await message.answer('Формат: /delete ГГГГ-ММ-ДД')
+            await message.answer('🐷 За какой день удалить записи?', reply_markup=day_shortcuts('delete'))
             return
-    await message.answer('Удалить ' + ('весь дневник' if target == 'all' else target) + '? Отправленные сообщения в Telegram сохранятся.', reply_markup=keyboard([('Да, удалить', 'delete:' + target)]))
+    await message.answer('Удалить ' + ('весь дневник' if target == 'all' else date_label(target)) + '? Отправленные сообщения в Telegram сохранятся.', reply_markup=keyboard([('Да, удалить', 'delete:' + target), ('Отмена', 'menu:home')]))
 
 
 @dp.callback_query(F.data.startswith('delete:'))
@@ -367,6 +428,15 @@ async def text_value(message: Message, state: FSMContext):
     await save(message, state, message.text.strip())
 
 
+async def configure_commands(bot):
+    common = [('start', 'Главное меню 🐷'), ('day', 'Посмотреть записи дня'),
+              ('calendar', 'Календарик 🌸'), ('forecast', 'Прогноз цикла'), ('cancel', 'Отменить ввод')]
+    owner = common + [('record', 'Добавить запись 🎀'), ('share', 'Обмен с любимым'),
+                      ('delete', 'Удалить записи дня'), ('erase', 'Удалить весь дневник')]
+    await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in owner])
+    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+
+
 async def main():
     global store, tz
     token = os.environ.get('BOT_TOKEN')
@@ -379,6 +449,7 @@ async def main():
     store = Store(path)
     bot = Bot(token)
     try:
+        await configure_commands(bot)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         store.db.close()
