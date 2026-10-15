@@ -10,7 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aiogram import BaseMiddleware, Bot, Dispatcher
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -232,30 +232,67 @@ async def save(message,state,value):
     await message.answer('Хрю! Сохранено 🐷💕',reply_markup=keyboard(items))
 
 
-async def show_day(message,day,user,action='day',offset=0):
+def telegram_length(text):
+    return len(text.encode('utf-16-le')) // 2
+
+
+async def show_day(message,day,user,action='day',offset=0,edit=False):
     entries=store.events(day)
-    await message.answer(f'🐷 {pretty(day)} · записей: {len(entries)}')
     periods=[p for p in store.periods() if p['start']<=day<=(p['end'] or today())]
+    header=f'🐷 {pretty(day)} · записей: {len(entries)}'
     for p in periods:
-        text=f'🌸 Месячные с {pretty(p["start"])}'+(f' по {pretty(p["end"])}' if p['end'] else ' · ещё идут')
-        controls=keyboard([('Исправить период',f'period:{p["id"]}')]) if user in WRITERS else None
-        await message.answer(text,reply_markup=controls)
-    for e in entries[offset:offset+5]:
-        controls=keyboard([('✏️ Изменить',f'event:{e["id"]}'),('🗑 Удалить',f'ask:event:{e["id"]}')],2) if user in WRITERS else None
-        await message.answer(f'{e["time"] or "Время не указано"} · {e["kind"]}\n{e["value"]}',reply_markup=controls)
-    items=[]
-    if offset:
-        items.append(('‹ Назад',f'page:{action}:{day}:{max(0,offset-5)}'))
-    if offset+5<len(entries):
-        items.append(('Дальше ›',f'page:{action}:{day}:{offset+5}'))
-    if action=='delete' and user in WRITERS and entries:
-        items.append(('Удалить все записи этого дня',f'ask:day:{day}'))
+        header+='\n🌸 Месячные с '+pretty(p['start'])+(f' по {pretty(p["end"])}' if p['end'] else ' · ещё идут')
+    # Telegram limits text to 4096 UTF-16 units. Keep complete events together;
+    # an emoji can occupy two units even though Python counts one character.
+    pages=[]
+    blocks=[]
+    size=telegram_length(header)+100
+    for number,e in enumerate(entries,1):
+        value=f'{e["value"]}/10' if e['kind']=='Боль' and e['value'].isdigit() else e['value']
+        block=f'{number}. {e["time"] or "Время не указано"} · {e["kind"]}\n{value}'
+        cost=telegram_length(block)+2
+        if blocks and (size+cost>4000 or len(blocks)>=10):
+            pages.append(blocks)
+            blocks=[]
+            size=telegram_length(header)+100
+        blocks.append((number,e,block))
+        size+=cost
+    if blocks or not pages:
+        pages.append(blocks)
+    page=max(0,min(offset,len(pages)-1))
+    text=header+'\n\n'+'\n\n'.join(block for _,_,block in pages[page])
+    if not entries:
+        text+='Записей за этот день пока нет 🐷🌷'
+    if len(pages)>1:
+        text+=f'\n\nСтраница {page+1} из {len(pages)}'
+    rows=[]
     if user in WRITERS:
-        items.append(('Добавить запись',f'd:record:{day}'))
-    items.append(('Другой день',f'menu:{action}'))
-    if not entries and not periods:
-        await message.answer('Здесь пока пусто 🐷🌷')
-    await message.answer('🐽 Что дальше?',reply_markup=keyboard(items))
+        for number,e,_ in pages[page]:
+            rows.append([InlineKeyboardButton(text=f'✏️ Изменить №{number}',callback_data=f'event:{e["id"]}'),
+                         InlineKeyboardButton(text=f'🗑 Удалить №{number}',callback_data=f'ask:event:{e["id"]}')])
+        for p in periods:
+            rows.append([InlineKeyboardButton(text='🌸 Исправить период',callback_data=f'period:{p["id"]}')])
+    nav=[]
+    if page:
+        nav.append(InlineKeyboardButton(text='‹ Назад',callback_data=f'page:{action}:{day}:{page-1}'))
+    if page+1<len(pages):
+        nav.append(InlineKeyboardButton(text='Дальше ›',callback_data=f'page:{action}:{day}:{page+1}'))
+    if nav:
+        rows.append(nav)
+    if action=='delete' and user in WRITERS and entries:
+        rows.append([InlineKeyboardButton(text='Удалить все записи дня',callback_data=f'ask:day:{day}')])
+    if user in WRITERS:
+        rows.append([InlineKeyboardButton(text='🐷 Добавить запись',callback_data=f'd:record:{day}')])
+    rows.append([InlineKeyboardButton(text='📅 Другой день',callback_data=f'menu:{action}')])
+    markup=InlineKeyboardMarkup(inline_keyboard=rows)
+    if edit:
+        try:
+            await message.edit_text(text,reply_markup=markup)
+        except TelegramBadRequest as exc:
+            if 'message is not modified' not in str(exc).lower():
+                raise
+    else:
+        await message.answer(text,reply_markup=markup)
 
 
 async def period_panel(message,period_id=None):
@@ -480,7 +517,7 @@ async def callbacks(query:CallbackQuery,state:FSMContext):
                 await save(message,state,OPTIONS[data['kind']][int(parts[2])])
         elif head=='page':
             await state.clear()
-            await show_day(message,parse_day(parts[2]),user,parts[1],max(0,int(parts[3])))
+            await show_day(message,parse_day(parts[2]),user,parts[1],max(0,int(parts[3])),edit=True)
         elif head=='event':
             event=store.event(int(parts[1]))
             if not event:

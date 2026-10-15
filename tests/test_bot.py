@@ -156,3 +156,53 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.click('m:pastend:2026-09')
         await self.click('d:pastend:2026-09-05')
         self.assertEqual([(p['start'],p['end']) for p in bot.store.periods()],[('2026-09-01','2026-09-05'),('2026-10-01','2026-10-05')])
+
+    async def test_day_summary_is_one_message_with_numbered_controls(self):
+        symptom=bot.store.add('2026-10-01','Симптомы','Вздутие, Усталость','16:26')
+        pain=bot.store.add('2026-10-01','Боль','6','16:27')
+        await bot.show_day(self.message,'2026-10-01',MASHA)
+        self.message.answer.assert_awaited_once()
+        text=self.message.answer.call_args.args[0]
+        self.assertIn('1. 16:26 · Симптомы\nВздутие, Усталость',text)
+        self.assertIn('2. 16:27 · Боль\n6/10',text)
+        markup=self.message.answer.call_args.kwargs['reply_markup']
+        self.assertEqual(markup.inline_keyboard[0][0].callback_data,f'event:{symptom}')
+        self.assertEqual(markup.inline_keyboard[1][1].callback_data,f'ask:event:{pain}')
+
+    async def test_long_day_pages_edit_same_message_without_truncating(self):
+        values=['🐷'*1500, 'а'*1500, 'б'*1500]
+        for value in values:
+            bot.store.add('2026-10-01','Заметка',value)
+        texts=[]
+        page=0
+        while True:
+            if page==0:
+                await bot.show_day(self.message,'2026-10-01',MASHA)
+                call=self.message.answer.call_args
+            else:
+                await self.click(f'page:day:2026-10-01:{page}')
+                call=self.message.edit_text.call_args
+            texts.append(call.args[0])
+            self.assertLessEqual(bot.telegram_length(call.args[0]),4096)
+            buttons=[b for row in call.kwargs['reply_markup'].inline_keyboard for b in row]
+            if not any(b.text=='Дальше ›' for b in buttons):
+                break
+            page+=1
+            self.assertLess(page,10)
+        self.message.answer.assert_awaited_once()
+        self.assertGreater(self.message.edit_text.await_count,0)
+        for value in values:
+            self.assertIn(value,'\n'.join(texts))
+
+    async def test_empty_day_and_partner_summary_have_single_message(self):
+        await bot.show_day(self.message,'2026-10-01',PARTNER)
+        self.message.answer.assert_awaited_once()
+        self.assertIn('пока нет',self.message.answer.call_args.args[0])
+        bot.store.start_period('2026-10-01',end='2026-10-05')
+        bot.store.add('2026-10-01','Заметка','test')
+        self.message.answer.reset_mock()
+        await bot.show_day(self.message,'2026-10-01',PARTNER)
+        self.message.answer.assert_awaited_once()
+        self.assertIn('Месячные с',self.message.answer.call_args.args[0])
+        buttons=[b.callback_data for row in self.message.answer.call_args.kwargs['reply_markup'].inline_keyboard for b in row]
+        self.assertFalse(any(b.startswith(('event:','ask:','period:')) for b in buttons))
