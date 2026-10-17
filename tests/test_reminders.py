@@ -42,3 +42,29 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.api.send_message.await_count,1)
         self.api.send_message.side_effect=None
         self.assertTrue(await tick(self.api,self.s,self.now+timedelta(minutes=5)))
+
+    async def test_pill_schedule_is_independent_and_once_daily(self):
+        self.assertFalse(await tick(self.api,self.s,self.now,kind='pill'))
+        self.s.set_setting('pill_enabled','yes')
+        self.s.set_setting('pill_time','21:00')
+        self.assertFalse(await tick(self.api,self.s,self.now-timedelta(minutes=1),kind='pill'))
+        self.assertTrue(await tick(self.api,self.s,self.now,kind='pill'))
+        self.assertIn('таблетки',self.api.send_message.call_args.args[1])
+        self.assertIsNone(self.s.get_setting('reminder_last'))
+        self.assertFalse(await tick(self.api,self.s,self.now+timedelta(minutes=1),kind='pill'))
+        self.s.set_setting('reminder_enabled','yes')
+        self.assertTrue(await tick(self.api,self.s,self.now))
+        self.assertTrue(await tick(self.api,self.s,self.now+timedelta(days=1),kind='pill'))
+
+    async def test_pill_snooze_and_failure_do_not_change_diary_schedule(self):
+        self.s.set_setting('pill_enabled','yes')
+        self.s.set_setting('pill_snooze',(self.now+timedelta(hours=1)).isoformat())
+        self.assertFalse(await tick(self.api,self.s,self.now,kind='pill'))
+        self.api.send_message.side_effect=TelegramNetworkError(method=SendMessage(chat_id=MASHA,text='test'),message='offline')
+        self.assertFalse(await tick(self.api,self.s,self.now+timedelta(hours=1),kind='pill'))
+        self.assertIsNone(self.s.get_setting('reminder_retry'))
+        self.assertIsNone(self.s.get_setting('pill_last'))
+        self.api.send_message.side_effect=None
+        self.assertTrue(await tick(self.api,self.s,self.now+timedelta(hours=1,minutes=5),kind='pill'))
+        self.s.set_setting('pill_enabled','no')
+        self.assertFalse(await tick(self.api,self.s,self.now+timedelta(days=1),kind='pill'))

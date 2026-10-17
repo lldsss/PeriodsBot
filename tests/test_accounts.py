@@ -116,6 +116,21 @@ class AccountTests(unittest.IsolatedAsyncioTestCase):
         await self.click('d:pstart:2026-01-01',PARTNER)
         self.assertEqual(bot.store.for_user(MASHA).periods(),[])
 
+    async def test_pill_preferences_and_delivery_stay_in_test_account(self):
+        await self.click('pill:09:00',TEST_USER)
+        await self.click('pill:on',TEST_USER)
+        main=bot.store.for_user(MASHA)
+        test=bot.store.for_user(TEST_USER)
+        self.assertEqual(main.get_setting('pill_enabled','no'),'no')
+        self.transport.calls.clear()
+        stamp=datetime(2026,10,14,9,0,tzinfo=bot.tz)
+        self.assertTrue(await tick(self.api,test,stamp,TEST_USER,kind='pill'))
+        self.assertEqual(len(self.calls_to(TEST_USER)),1)
+        self.assertEqual(self.calls_to(MASHA),[])
+        self.assertEqual(self.calls_to(PARTNER),[])
+        await self.click('pill:on',PARTNER)
+        self.assertEqual(main.get_setting('pill_enabled','no'),'no')
+
 
 class AccountStorageTests(unittest.TestCase):
     def test_files_persist_separately_and_main_is_preserved(self):

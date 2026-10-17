@@ -65,7 +65,7 @@ def calendar_image(store, month, today):
 def pain_chart(stats):
     image = Image.new('RGB', (1120, 530), BG)
     d = ImageDraw.Draw(image)
-    d.text((45,25), 'Как менялась боль', font=font(36), fill=INK)
+    d.text((45,25), 'Боль за последние 7 дней', font=font(36), fill=INK)
     d.text((45,78), 'Средняя оценка за день · пустые дни не означают отсутствие боли', font=font(20), fill=INK)
     pig(d,1030,63,30)
     start, end = date.fromisoformat(stats['start']), date.fromisoformat(stats['end'])
@@ -83,7 +83,7 @@ def pain_chart(stats):
             d.line((previous[1],previous[2],x,y), fill=PINK, width=3)
         d.ellipse((x-5,y-5,x+5,y+5), fill=PINK)
         previous=(stamp,x,y)
-    for offset in (0,span//2,span):
+    for offset in (range(span+1) if span<=6 else (0,span//2,span)):
         x=70+offset/span*990
         d.text((min(x,970),447), (start+timedelta(days=offset)).strftime('%d.%m'), font=font(18), fill=INK)
     if not stats['pain']:

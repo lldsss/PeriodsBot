@@ -206,3 +206,25 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Месячные с',self.message.answer.call_args.args[0])
         buttons=[b.callback_data for row in self.message.answer.call_args.kwargs['reply_markup'].inline_keyboard for b in row]
         self.assertFalse(any(b.startswith(('event:','ask:','period:')) for b in buttons))
+
+    async def test_pills_custom_time_and_enable_are_separate(self):
+        await self.click('pill:custom')
+        self.message.text='08:45'
+        await bot.reminder_text(self.message,self.state)
+        await self.click('pill:on')
+        self.assertEqual(bot.store.get_setting('pill_time'),'08:45')
+        self.assertEqual(bot.store.get_setting('pill_enabled'),'yes')
+        self.assertEqual(bot.store.get_setting('reminder_enabled','no'),'no')
+        await self.click('pill:off')
+        self.assertEqual(bot.store.get_setting('pill_enabled'),'no')
+
+    async def test_pain_graph_contains_only_last_seven_days(self):
+        bot.store.add('2026-10-07','Боль','10')
+        bot.store.add('2026-10-08','Боль','2')
+        bot.store.add('2026-10-14','Боль','6')
+        with patch('bot.pain_chart',return_value=b'png') as chart:
+            await bot.show_stats(self.message)
+        data=chart.call_args.args[0]
+        self.assertEqual(data['start'],'2026-10-08')
+        self.assertEqual(data['end'],'2026-10-14')
+        self.assertEqual(data['pain'],{'2026-10-08':2,'2026-10-14':6})

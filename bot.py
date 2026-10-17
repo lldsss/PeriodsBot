@@ -39,7 +39,7 @@ OPTIONS = {
 COMMANDS = [('start','Главное меню 🐷'), ('record','Добавить запись'), ('period','Начало и конец месячных'),
             ('day','Посмотреть записи дня'), ('calendar','Календарик 🌸'), ('stats','Статистика и график боли'),
             ('forecast','Прогноз цикла'), ('edit','Исправить запись'), ('undo','Отменить последнее действие'),
-            ('reminders','Настроить напоминания'), ('share','Информация об обмене'),
+            ('reminders','Настроить напоминания'), ('pills','Напоминания о таблетках 💊'), ('share','Информация об обмене'),
             ('delete','Удалить записи дня'), ('erase','Очистить дневник'), ('cancel','Отменить ввод')]
 SHARING_TEXT = 'Обмен всегда включён 💕 Все записи, изменения и оценки доступны партнёру и отправляются ему. Уже доставленные сообщения останутся в его чате после удаления или отмены записей.'
 dp = Dispatcher(events_isolation=SimpleEventIsolation())
@@ -107,7 +107,7 @@ def menu(user):
     if user in WRITERS:
         items = [('🐷 Добавить запись','menu:record'), ('🌸 Месячные','menu:period')] + items + [
             ('✏️ Исправить запись','menu:edit'), ('↩️ Отменить последнее','menu:undo'),
-            ('⏰ Напоминания','menu:reminders'), ('💕 Обмен','menu:share')]
+            ('⏰ Напоминания','menu:reminders'), ('💊 Таблетки','menu:pills'), ('💕 Обмен','menu:share')]
     return keyboard(items,2)
 
 
@@ -381,16 +381,23 @@ async def show_stats(message):
         text+='\nПоследние отметки настроения:\n'+'\n'.join(f'{pretty(day)} {time} — {value[:100]}' for day,time,value in stats['mood_history'])+'\n'
     text+='\n'+store.forecast(today())
     await message.answer(text)
-    image=await asyncio.to_thread(pain_chart,stats)
-    await message.answer_photo(BufferedInputFile(image,filename='pain.png'),caption='Средняя боль за день. Пропуски не заменяются нулями.',reply_markup=menu(message.chat.id))
+    week=store.stats(today(),days=7)
+    image=await asyncio.to_thread(pain_chart,week)
+    await message.answer_photo(BufferedInputFile(image,filename='pain.png'),caption=f'Боль за последние 7 дней: {pretty(week["start"])} — {pretty(week["end"])}. Средняя оценка за день; пропуски не заменяются нулями.',reply_markup=menu(message.chat.id))
 
 
-async def reminder_panel(message):
-    enabled=store.get_setting('reminder_enabled','no')=='yes'
-    await message.answer(f'⏰ Напоминания {"включены" if enabled else "выключены"}.\nВремя: {store.get_setting("reminder_time","21:00")} ({tz.key}). Только для твоего аккаунта.',reply_markup=keyboard([
-        ('Выключить' if enabled else 'Включить','remind:off' if enabled else 'remind:on'),
-        ('09:00','remind:09:00'),('18:00','remind:18:00'),('21:00','remind:21:00'),
-        ('Своё время','remind:custom'),('🐷 Главное меню','menu:start')],2))
+async def reminder_panel(message,kind='reminder'):
+    prefix='pill' if kind=='pill' else 'remind'
+    enabled=store.get_setting(f'{kind}_enabled','no')=='yes'
+    title='💊 Таблетки' if kind=='pill' else '⏰ Дневничок'
+    extra='\nВыбери своё время и нажми «Включить». Напоминание ежедневное.' if kind=='pill' else ''
+    items=[('Выключить' if enabled else 'Включить',f'{prefix}:off' if enabled else f'{prefix}:on'),
+           ('09:00',f'{prefix}:09:00'),('18:00',f'{prefix}:18:00'),('21:00',f'{prefix}:21:00'),
+           ('Своё время',f'{prefix}:custom')]
+    if kind=='reminder':
+        items.append(('💊 Напоминание о таблетках','menu:pills'))
+    items.append(('🐷 Главное меню','menu:start'))
+    await message.answer(f'{title}: напоминания {"включены" if enabled else "выключены"}.\nВремя: {store.get_setting(f"{kind}_time","21:00")} ({tz.key}). Только для твоего аккаунта.'+extra,reply_markup=keyboard(items,2))
 
 
 async def perform_command(message,state,command,user,arg=None):
@@ -415,8 +422,8 @@ async def perform_command(message,state,command,user,arg=None):
         await message.answer(store.forecast(today()),reply_markup=menu(user))
     elif command=='share':
         await message.answer(sharing_text(user))
-    elif command=='reminders':
-        await reminder_panel(message)
+    elif command in ('reminders','pills'):
+        await reminder_panel(message,'pill' if command=='pills' else 'reminder')
     elif command=='undo':
         last=store.last_action()
         if last:
@@ -556,8 +563,8 @@ async def callbacks(query:CallbackQuery,state:FSMContext):
         elif head=='cal':
             await state.clear()
             await show_calendar(message,parts[1])
-        elif head=='remind':
-            await reminder_action(message,state,parts[1:])
+        elif head in ('remind','pill'):
+            await reminder_action(message,state,parts[1:],'pill' if head=='pill' else 'reminder')
         else:
             await state.clear()
             await message.answer('Меню обновилось 🐷 Открой нужный раздел заново.',reply_markup=menu(user))
@@ -575,30 +582,31 @@ async def set_event_time(message,state,value):
     await message.answer('Время выбрано. Теперь укажи значение записи 🐷',reply_markup=form_keyboard(data))
 
 
-async def reminder_action(message,state,parts):
+async def reminder_action(message,state,parts,kind='reminder'):
     await state.clear()
     action=parts[0]
     if action=='custom':
         await state.set_state(Entry.reminder_time)
+        await state.update_data(reminder_kind=kind)
         await message.answer(f'Во сколько напоминать? Введи ЧЧ:ММ, например 20:30. Часовой пояс: {tz.key}.')
         return
     if action in ('on','off'):
-        store.set_setting('reminder_enabled','yes' if action=='on' else 'no')
-        store.set_setting('reminder_snooze','')
+        store.set_setting(f'{kind}_enabled','yes' if action=='on' else 'no')
+        store.set_setting(f'{kind}_snooze','')
     elif action=='snooze':
-        if store.get_setting('reminder_enabled','no')!='yes':
+        if store.get_setting(f'{kind}_enabled','no')!='yes':
             raise ValueError('Напоминания выключены.')
-        store.set_setting('reminder_snooze',(now()+timedelta(hours=1)).isoformat())
-        store.set_setting('reminder_last',today())
+        store.set_setting(f'{kind}_snooze',(now()+timedelta(hours=1)).isoformat())
+        store.set_setting(f'{kind}_last',today())
         await message.answer('Хрю, напомню через час 🐷🌙')
         return
     else:
         value=':'.join(parts)
         if not valid_time(value):
             raise ValueError('Некорректное время.')
-        store.set_setting('reminder_time',value)
-        store.set_setting('reminder_snooze','')
-    await reminder_panel(message)
+        store.set_setting(f'{kind}_time',value)
+        store.set_setting(f'{kind}_snooze','')
+    await reminder_panel(message,kind)
 
 
 @dp.message(Entry.clock)
@@ -617,10 +625,11 @@ async def reminder_text(message:Message,state:FSMContext):
     if not valid_time(value):
         await message.answer('Введи время ЧЧ:ММ, например 20:30, или /cancel.')
         return
-    store.set_setting('reminder_time',value)
-    store.set_setting('reminder_snooze','')
+    kind=(await state.get_data()).get('reminder_kind','reminder')
+    store.set_setting(f'{kind}_time',value)
+    store.set_setting(f'{kind}_snooze','')
     await state.clear()
-    await reminder_panel(message)
+    await reminder_panel(message,kind)
 
 
 @dp.message(Entry.value)
