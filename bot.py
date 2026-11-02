@@ -1,5 +1,6 @@
 import asyncio
 import calendar
+import hashlib
 import contextlib
 import logging
 import os
@@ -36,7 +37,7 @@ OPTIONS = {
     'Выделения': ['Мажущие', 'Слабые', 'Умеренные', 'Обильные'],
     'Месячные': ['Да', 'Нет'],  # editing imported daily marks only
 }
-COMMANDS = [('start','Главное меню 🐷'), ('record','Добавить запись'), ('period','Начало и конец месячных'),
+COMMANDS = [('start','Главное меню 🐷'), ('version','Версия бота и мой доступ'), ('record','Добавить запись'), ('period','Начало и конец месячных'),
             ('day','Посмотреть записи дня'), ('calendar','Календарик 🌸'), ('stats','Статистика и график боли'),
             ('forecast','Прогноз цикла'), ('edit','Исправить запись'), ('undo','Отменить последнее действие'),
             ('reminders','Настроить напоминания'), ('pills','Напоминания о таблетках 💊'), ('share','Информация об обмене'),
@@ -115,7 +116,7 @@ def menu(user):
 
 
 def is_write_action(action):
-    return action not in ('day','calendar','stats','forecast','share','start','cancel')
+    return action not in ('day','calendar','stats','forecast','share','start','cancel','version')
 
 
 def allowed(user, action):
@@ -146,6 +147,21 @@ def date_picker(month, action):
         rows.append(nav)
     rows.append([InlineKeyboardButton(text='🐷 Главное меню',callback_data='menu:start')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_id():
+    digest=hashlib.sha256()
+    root=Path(__file__).resolve().parent
+    for name in ('bot.py','storage.py','reminders.py','visuals.py'):
+        digest.update(name.encode())
+        digest.update((root/name).read_bytes())
+    return digest.hexdigest()[:12]
+
+
+def version_text(user):
+    role='Маша' if user==MASHA else 'партнёр' if user==PARTNER else 'тестовый аккаунт'
+    access='Близость и секс: добавление разрешено.' if user==PARTNER else 'Все категории своего дневника доступны.'
+    return f'🐷 Версия: {build_id()}\nТвой Telegram ID: {user}\nРоль: {role}\n{access}'
 
 
 def sharing_text(user):
@@ -425,6 +441,8 @@ async def perform_command(message,state,command,user,arg=None):
         return
     if command=='start':
         await message.answer(('🐷 Тестовый хрю-дневничок\n' if user==TEST_USER else '🐷🌷 Машин хрю-дневничок\n')+sharing_text(user),reply_markup=menu(user))
+    elif command=='version':
+        await message.answer(version_text(user))
     elif command in ('record','day','edit','delete'):
         if arg:
             await select_date(message,state,command,arg,user)

@@ -223,6 +223,20 @@ class AccountTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.periods(),[])
         self.assertEqual(self.calls_to(MASHA),[])
 
+    async def test_live_version_reports_partner_access_and_record_still_opens(self):
+        await self.send('/version',PARTNER)
+        text=self.calls_to(PARTNER)[-1].text
+        self.assertIn(bot.build_id(),text)
+        self.assertIn(str(PARTNER),text)
+        self.assertIn('Роль: партнёр',text)
+        self.assertIn('добавление разрешено',text)
+        await self.send('/record',PARTNER)
+        self.assertEqual(self.calls_to(PARTNER)[-1].text,'🐷 Выбери день')
+        await self.click('d:record:2026-01-01',PARTNER)
+        labels={b.text for row in self.calls_to(PARTNER)[-1].reply_markup.inline_keyboard for b in row}
+        self.assertTrue({'Близость','Секс'}<=labels)
+        self.assertNotIn('Боль',labels)
+
 
 class AccountStorageTests(unittest.TestCase):
     def test_files_persist_separately_and_main_is_preserved(self):
