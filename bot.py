@@ -11,7 +11,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aiogram import BaseMiddleware, Bot, Dispatcher
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.exceptions import (TelegramAPIError, TelegramBadRequest, TelegramNetworkError,
+                                TelegramServerError, TelegramRetryAfter)
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -711,9 +712,26 @@ async def text_value(message:Message,state:FSMContext):
             await message.answer(str(exc),reply_markup=menu(current_user.get()))
 
 
+async def retry_telegram(operation,label):
+    delay=1
+    while True:
+        try:
+            return await operation()
+        except TelegramRetryAfter as exc:
+            wait=max(1,exc.retry_after)
+            reason='TelegramRetryAfter'
+        except (TelegramNetworkError,TelegramServerError) as exc:
+            wait=delay
+            delay=min(delay*2,30)
+            reason=type(exc).__name__
+        # Never print exception payloads: request URLs may contain credentials.
+        logging.getLogger(__name__).warning('%s: %s; retry in %s seconds',label,reason,wait)
+        await asyncio.sleep(wait)
+
+
 async def configure_commands(api):
-    await api.set_my_commands([BotCommand(command=c,description=d) for c,d in COMMANDS])
-    await api.set_chat_menu_button(menu_button=MenuButtonCommands())
+    await retry_telegram(lambda:api.set_my_commands([BotCommand(command=c,description=d) for c,d in COMMANDS],request_timeout=20),'Set commands')
+    await retry_telegram(lambda:api.set_chat_menu_button(menu_button=MenuButtonCommands(),request_timeout=20),'Set menu')
 
 
 async def main():
@@ -730,6 +748,10 @@ async def main():
     task=None
     try:
         await configure_commands(api)
+        # Cache bot identity before polling; aiogram's initial getMe otherwise
+        # occurs outside its update-fetch retry loop.
+        await retry_telegram(api.me,'Get bot identity')
+        logging.getLogger(__name__).warning('Telegram connected; build %s; starting polling',build_id())
         task=asyncio.create_task(reminders.run(api,{owner:store.for_user(owner) for owner in WRITERS},tz))
         await dp.start_polling(api,allowed_updates=dp.resolve_used_update_types())
     finally:
