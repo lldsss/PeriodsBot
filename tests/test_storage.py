@@ -106,3 +106,18 @@ class StoreTests(unittest.TestCase):
             reopened.undo(reopened.last_action()['id'])
             self.assertEqual(reopened.events('2026-10-01'),[])
             reopened.db.close()
+
+    def test_author_survives_edit_and_undo_and_legacy_history_is_readable(self):
+        import json
+        from storage import PARTNER
+        eid=self.s.add('2026-10-01','Секс','Да',author_id=PARTNER)
+        self.s.edit(eid,'Было хорошо')
+        self.s.undo(self.s.last_action()['id'])
+        self.assertEqual(self.s.event(eid)['author_id'],PARTNER)
+        # Old snapshots were written before author_id existed.
+        snapshot={'events':[{'id':eid,'day':'2026-10-01','time':'','kind':'Секс','value':'Да'}],'periods':[]}
+        with self.s.db:
+            self.s.db.execute('INSERT INTO history(label,snapshot) VALUES (?,?)',('legacy',json.dumps(snapshot)))
+        self.s.undo(self.s.last_action()['id'])
+        self.assertEqual(self.s.event(eid)['value'],'Да')
+        self.assertIsNone(self.s.event(eid)['author_id'])

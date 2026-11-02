@@ -131,6 +131,50 @@ class AccountTests(unittest.IsolatedAsyncioTestCase):
         await self.click('pill:on',PARTNER)
         self.assertEqual(main.get_setting('pill_enabled','no'),'no')
 
+    async def test_partner_records_intimacy_and_sex_and_notifies_masha(self):
+        await self.send('/start',PARTNER)
+        start=self.calls_to(PARTNER)[-1]
+        self.assertTrue(any(b.callback_data=='menu:record' for row in start.reply_markup.inline_keyboard for b in row))
+        await self.send('/record 2026-01-01',PARTNER)
+        category_buttons=[b for row in self.calls_to(PARTNER)[-1].reply_markup.inline_keyboard for b in row if b.callback_data.startswith('kind:')]
+        self.assertEqual({b.text for b in category_buttons},{'Близость','Секс'})
+        await self.click('kind:2026-01-01:4',PARTNER)
+        state=await bot.dp.fsm.get_context(bot=self.api,chat_id=PARTNER,user_id=PARTNER).get_data()
+        await self.click(f'clock:{state["nonce"]}',PARTNER)
+        await self.send('09:30',PARTNER)
+        await self.send('Обнимались утром',PARTNER)
+        await self.click('kind:2026-01-01:5',PARTNER)
+        state=await bot.dp.fsm.get_context(bot=self.api,chat_id=PARTNER,user_id=PARTNER).get_data()
+        await self.click(f'val:{state["nonce"]}:0',PARTNER)
+        main=bot.store.for_user(MASHA)
+        entries=main.events('2026-01-01')
+        self.assertEqual(len(entries),2)
+        self.assertTrue(all(e['author_id']==PARTNER for e in entries))
+        self.assertTrue(any(e['time']=='09:30' and e['value']=='Обнимались утром' for e in entries))
+        self.assertEqual(main.marks('2026-01','2026-01-01')[1],{'Б','С'})
+        notices=[getattr(c,'text','') or '' for c in self.calls_to(MASHA)]
+        self.assertEqual(len(notices),2)
+        self.assertTrue(all('Партнёр добавил' in text for text in notices))
+        self.assertEqual(bot.store.for_user(TEST_USER).events('2026-01-01'),[])
+        await self.send('/day 2026-01-01',MASHA)
+        self.assertIn('от партнёра',self.calls_to(MASHA)[-1].text)
+
+    async def test_partner_cannot_use_other_categories_or_edit_delete_undo(self):
+        main=bot.store.for_user(MASHA)
+        eid=main.add('2026-01-01','Боль','7')
+        for payload in ['kind:2026-01-01:1','kind:2026-01-01:7',f'event:{eid}',f'del:event:{eid}',f'undo:{main.last_action()["id"]}','d:pstart:2026-01-01','pill:on']:
+            await self.click(payload,PARTNER)
+        self.assertEqual(main.event(eid)['value'],'7')
+        self.assertEqual(main.periods(),[])
+        self.assertEqual(main.get_setting('pill_enabled','no'),'no')
+        # A crafted state must not bypass the save-layer check.
+        ctx=bot.dp.fsm.get_context(bot=self.api,chat_id=PARTNER,user_id=PARTNER)
+        await ctx.set_state(bot.Entry.value)
+        await ctx.update_data(kind='Боль',day='2026-01-01',time='09:00',nonce='forged',edit_id=None)
+        await self.click('val:forged:0',PARTNER)
+        await self.send('2',PARTNER)
+        self.assertEqual(len(main.events('2026-01-01')),1)
+
 
 class AccountStorageTests(unittest.TestCase):
     def test_files_persist_separately_and_main_is_preserved(self):

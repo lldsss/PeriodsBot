@@ -24,13 +24,15 @@ class Store:
         with self.db:
             self.db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
             self.db.execute('CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT NOT NULL, time TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL)')
+            if 'author_id' not in {row[1] for row in self.db.execute('PRAGMA table_info(events)')}:
+                self.db.execute('ALTER TABLE events ADD COLUMN author_id INTEGER')
             self.db.execute('CREATE INDEX IF NOT EXISTS events_day ON events(day)')
             self.db.execute('CREATE TABLE IF NOT EXISTS periods (id INTEGER PRIMARY KEY AUTOINCREMENT, start TEXT NOT NULL, end TEXT)')
             self.db.execute('CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT, snapshot TEXT)')
             if self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='entries'").fetchone():
                 self.db.execute("INSERT INTO events(day,time,kind,value) SELECT day,'',kind,value FROM entries")
                 self.db.execute('DROP TABLE entries')
-            self.db.execute("INSERT OR REPLACE INTO settings VALUES ('schema_version','2')")
+            self.db.execute("INSERT OR REPLACE INTO settings VALUES ('schema_version','3')")
 
     def get_setting(self, key, default=None):
         row = self.db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
@@ -57,19 +59,21 @@ class Store:
         if not row or row['id'] != expected_id:
             raise ValueError('Действие уже изменилось. Открой «Отменить последнее» ещё раз.')
         snapshot = json.loads(row['snapshot'])
+        for event in snapshot['events']:
+            event.setdefault('author_id',None)
         with self.db:
             self.db.execute('DELETE FROM events')
             self.db.execute('DELETE FROM periods')
-            self.db.executemany('INSERT INTO events(id,day,time,kind,value) VALUES (:id,:day,:time,:kind,:value)', snapshot['events'])
+            self.db.executemany('INSERT INTO events(id,day,time,kind,value,author_id) VALUES (:id,:day,:time,:kind,:value,:author_id)', snapshot['events'])
             self.db.executemany('INSERT INTO periods(id,start,end) VALUES (:id,:start,:end)', snapshot['periods'])
             self.db.execute('DELETE FROM history WHERE id=?', (row['id'],))
         return row['label']
 
-    def add(self, day, kind, value, time=''):
+    def add(self, day, kind, value, time='', author_id=None):
         date.fromisoformat(day)
         with self.db:
             self._snapshot(f'добавление «{kind}» за {day}')
-            cur = self.db.execute('INSERT INTO events(day,time,kind,value) VALUES (?,?,?,?)', (day, time, kind, value))
+            cur = self.db.execute('INSERT INTO events(day,time,kind,value,author_id) VALUES (?,?,?,?,?)', (day, time, kind, value, author_id))
         return cur.lastrowid
 
     def event(self, event_id):

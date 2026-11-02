@@ -43,6 +43,7 @@ COMMANDS = [('start','Главное меню 🐷'), ('record','Добавит�
             ('delete','Удалить записи дня'), ('erase','Очистить дневник'), ('cancel','Отменить ввод')]
 SHARING_TEXT = 'Обмен всегда включён 💕 Все записи, изменения и оценки доступны партнёру и отправляются ему. Уже доставленные сообщения останутся в его чате после удаления или отмены записей.'
 dp = Dispatcher(events_isolation=SimpleEventIsolation())
+PARTNER_KINDS = {'Близость', 'Секс'}
 store = None
 tz = ZoneInfo('Europe/Moscow')
 
@@ -108,6 +109,8 @@ def menu(user):
         items = [('🐷 Добавить запись','menu:record'), ('🌸 Месячные','menu:period')] + items + [
             ('✏️ Исправить запись','menu:edit'), ('↩️ Отменить последнее','menu:undo'),
             ('⏰ Напоминания','menu:reminders'), ('💊 Таблетки','menu:pills'), ('💕 Обмен','menu:share')]
+    if user==PARTNER:
+        items.insert(0,('💕 Отметить близость или секс','menu:record'))
     return keyboard(items,2)
 
 
@@ -116,7 +119,7 @@ def is_write_action(action):
 
 
 def allowed(user, action):
-    return user in WRITERS or not is_write_action(action)
+    return user in WRITERS or (user==PARTNER and action=='record') or not is_write_action(action)
 
 
 def day_shortcuts(action):
@@ -148,14 +151,21 @@ def date_picker(month, action):
 def sharing_text(user):
     if user==TEST_USER:
         return 'Тестовый режим 🧪 Все функции доступны в отдельном дневнике. Партнёр не получает уведомлений и не видит эти записи. Напоминания приходят только тебе.'
-    return SHARING_TEXT
+    text=SHARING_TEXT
+    if user==PARTNER:
+        text+=' Ты также можешь отмечать близость и секс через «Добавить запись»; Маша получит уведомление.'
+    return text
+
+
+def can_add(user,kind):
+    return user in WRITERS or (user==PARTNER and kind in PARTNER_KINDS)
 
 
 async def notify(api, text):
     if current_user.get()==TEST_USER:
         return None
     try:
-        await api.send_message(PARTNER,text)
+        await api.send_message(MASHA if current_user.get()==PARTNER else PARTNER,text)
         return True
     except TelegramAPIError:
         return False
@@ -164,12 +174,12 @@ async def notify(api, text):
 async def changed(message, text):
     delivered = await notify(message.bot, text)
     if delivered is False:
-        await message.answer('Запись сохранена, но уведомление не доставлено. Партнёру нужно открыть бота и нажать /start; также проверьте соединение.')
+        await message.answer('Запись сохранена, но уведомление не доставлено. Получателю нужно открыть бота и нажать /start; также проверьте соединение.')
 
 
 async def categories(message,day):
     await message.answer(f'🐽 {pretty(day)} · что отметим?',reply_markup=keyboard(
-        [(label,f'kind:{day}:{i}') for i,label in enumerate(LABELS)] + [('Другой день','menu:record')],2))
+        [(label,f'kind:{day}:{i}') for i,label in enumerate(LABELS) if can_add(current_user.get(),label)] + [('Другой день','menu:record')],2))
 
 
 def form_keyboard(data):
@@ -188,6 +198,8 @@ def form_keyboard(data):
 
 
 async def show_form(message,state,day,kind,edit=None):
+    if not can_add(current_user.get(),kind) or (current_user.get()==PARTNER and edit):
+        raise ValueError('Ты можешь добавлять только близость и секс.')
     await state.clear()
     selected=[]
     if edit and kind=='Симптомы':
@@ -215,6 +227,8 @@ async def save(message,state,value):
     if not data.get('kind'):
         await message.answer('Открой запись заново.',reply_markup=menu(current_user.get()))
         return
+    if not can_add(current_user.get(),data['kind']) or (current_user.get()==PARTNER and data.get('edit_id')):
+        raise ValueError('Ты можешь добавлять только близость и секс.')
     if not 1<=len(value)<=1500 or (data['kind'] in ('Боль','Месячные') and value not in OPTIONS[data['kind']]):
         await message.answer('Выбери допустимый вариант или введи текст до 1500 символов.',reply_markup=form_keyboard(data))
         return
@@ -222,11 +236,14 @@ async def save(message,state,value):
         store.edit(data['edit_id'],value,data['time'])
         verb='исправила'
     else:
-        store.add(data['day'],data['kind'],value,data['time'])
+        store.add(data['day'],data['kind'],value,data['time'],author_id=current_user.get())
         verb='добавила'
     await state.clear()
-    await changed(message,f'Маша {verb} запись · {pretty(data["day"])} {data["time"]}\n{data["kind"]}: {value}')
+    actor='Партнёр добавил' if current_user.get()==PARTNER else f'Маша {verb}'
+    await changed(message,f'{actor} запись · {pretty(data["day"])} {data["time"]}\n{data["kind"]}: {value}')
     items=[('Ещё за этот день 🌸',f'd:record:{data["day"]}'), ('↩️ Отменить последнее','menu:undo'), ('🐷 Главное меню','menu:start')]
+    if current_user.get()==PARTNER:
+        items=[item for item in items if item[1]!='menu:undo']
     if data['kind']=='Симптомы' and value!='Нет симптомов':
         items.insert(0,('Оценить боль от 1 до 10',f'kind:{data["day"]}:{LABELS.index("Боль")}'))
     await message.answer('Хрю! Сохранено 🐷💕',reply_markup=keyboard(items))
@@ -249,7 +266,8 @@ async def show_day(message,day,user,action='day',offset=0,edit=False):
     size=telegram_length(header)+100
     for number,e in enumerate(entries,1):
         value=f'{e["value"]}/10' if e['kind']=='Боль' and e['value'].isdigit() else e['value']
-        block=f'{number}. {e["time"] or "Время не указано"} · {e["kind"]}\n{value}'
+        author=' · от партнёра' if e.get('author_id')==PARTNER else ''
+        block=f'{number}. {e["time"] or "Время не указано"} · {e["kind"]}{author}\n{value}'
         cost=telegram_length(block)+2
         if blocks and (size+cost>4000 or len(blocks)>=10):
             pages.append(blocks)
@@ -281,7 +299,7 @@ async def show_day(message,day,user,action='day',offset=0,edit=False):
         rows.append(nav)
     if action=='delete' and user in WRITERS and entries:
         rows.append([InlineKeyboardButton(text='Удалить все записи дня',callback_data=f'ask:day:{day}')])
-    if user in WRITERS:
+    if user in WRITERS or user==PARTNER:
         rows.append([InlineKeyboardButton(text='🐷 Добавить запись',callback_data=f'd:record:{day}')])
     rows.append([InlineKeyboardButton(text='📅 Другой день',callback_data=f'menu:{action}')])
     markup=InlineKeyboardMarkup(inline_keyboard=rows)
@@ -460,8 +478,20 @@ async def callbacks(query:CallbackQuery,state:FSMContext):
     user=query.from_user.id
     message=query.message
     read_only=head in ('noop','cal','menu') or (head in ('d','m','page') and len(parts)>1 and parts[1]=='day')
-    if user not in WRITERS and not read_only:
-        await message.answer('Изменять дневник может только Маша.')
+    partner_add=False
+    if user==PARTNER:
+        if head in ('d','m') and len(parts)>1 and parts[1]=='record':
+            partner_add=True
+        elif head=='kind':
+            try:
+                partner_add=LABELS[int(parts[2])] in PARTNER_KINDS
+            except (ValueError,IndexError):
+                pass
+        elif head in ('val','clock','at'):
+            data=await state.get_data()
+            partner_add=data.get('kind') in PARTNER_KINDS and not data.get('edit_id')
+    if user not in WRITERS and not read_only and not partner_add:
+        await message.answer('Ты можешь добавлять только близость и секс; остальные записи изменяет Маша.')
         return
     try:
         if head=='noop':
@@ -611,7 +641,9 @@ async def reminder_action(message,state,parts,kind='reminder'):
 
 @dp.message(Entry.clock)
 async def clock_text(message:Message,state:FSMContext):
-    if message.from_user.id not in WRITERS: return
+    if message.from_user.id not in (*WRITERS,PARTNER): return
+    data=await state.get_data()
+    if not can_add(message.from_user.id,data.get('kind')) or (message.from_user.id==PARTNER and data.get('edit_id')): return
     try:
         await set_event_time(message,state,(message.text or '').strip())
     except ValueError as exc:
@@ -634,7 +666,9 @@ async def reminder_text(message:Message,state:FSMContext):
 
 @dp.message(Entry.value)
 async def text_value(message:Message,state:FSMContext):
-    if message.from_user.id not in WRITERS: return
+    if message.from_user.id not in (*WRITERS,PARTNER): return
+    data=await state.get_data()
+    if not can_add(message.from_user.id,data.get('kind')) or (message.from_user.id==PARTNER and data.get('edit_id')): return
     value=(message.text or '').strip()
     if not value or value.startswith('/') or len(value)>1500:
         await message.answer('Пришли текст от 1 до 1500 символов или /cancel.')
