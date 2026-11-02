@@ -175,6 +175,54 @@ class AccountTests(unittest.IsolatedAsyncioTestCase):
         await self.send('2',PARTNER)
         self.assertEqual(len(main.events('2026-01-01')),1)
 
+    async def test_partner_button_flow_stale_click_and_failed_notification(self):
+        from unittest.mock import patch
+        from aiogram.exceptions import TelegramForbiddenError
+        from aiogram.methods import SendMessage
+        await self.click('menu:record',PARTNER)
+        buttons=[b for row in self.calls_to(PARTNER)[-1].reply_markup.inline_keyboard for b in row]
+        self.assertTrue(any(b.callback_data.startswith('m:record:') for b in buttons))
+        await self.click('m:record:2026-01',PARTNER)
+        await self.click('d:record:2026-01-01',PARTNER)
+        await self.click('kind:2026-01-01:5',PARTNER)
+        ctx=bot.dp.fsm.get_context(bot=self.api,chat_id=PARTNER,user_id=PARTNER)
+        state=await ctx.get_data()
+        await self.click(f'clock:{state["nonce"]}',PARTNER)
+        await self.click(f'at:{state["nonce"]}:21:00',PARTNER)
+        # A blocked recipient must not lose the entry or cause a duplicate save.
+        original=self.transport.make_request
+        async def failing(api,method,timeout=None):
+            if method.__api_method__=='sendMessage' and method.chat_id==MASHA:
+                raise TelegramForbiddenError(method=SendMessage(chat_id=MASHA,text='test'),message='blocked')
+            return await original(api,method,timeout)
+        with patch.object(self.transport,'make_request',side_effect=failing):
+            await self.click(f'val:{state["nonce"]}:0',PARTNER)
+        entries=bot.store.for_user(MASHA).events('2026-01-01')
+        self.assertEqual(len(entries),1)
+        self.assertEqual(entries[0]['time'],'21:00')
+        self.assertTrue(any('не доставлено' in (getattr(c,'text','') or '') for c in self.calls_to(PARTNER)))
+        await self.click(f'val:{state["nonce"]}:0',PARTNER)
+        self.assertEqual(len(bot.store.for_user(MASHA).events('2026-01-01')),1)
+        self.assertIsNone(await ctx.get_state())
+
+    async def test_partner_denied_management_commands_and_forged_edit_state(self):
+        main=bot.store.for_user(MASHA)
+        eid=main.add('2026-01-01','Боль','7')
+        for command in ('/period','/edit','/delete','/erase','/undo','/reminders','/pills'):
+            await self.send(command,PARTNER)
+        for data in ('menu:erase','choose:pstart','m:pstart:2026-01','ask:all:all','del:all:all','periods','period:1','remind:on'):
+            await self.click(data,PARTNER)
+        ctx=bot.dp.fsm.get_context(bot=self.api,chat_id=PARTNER,user_id=PARTNER)
+        await ctx.set_state(bot.Entry.value)
+        await ctx.update_data(kind='Секс',day='2026-01-01',time='21:00',nonce='forged-edit',edit_id=eid)
+        await self.click('val:forged-edit:0',PARTNER)
+        await self.send('Исправить чужую запись',PARTNER)
+        self.assertEqual(main.events('2026-01-01'),[main.event(eid)])
+        self.assertEqual(main.event(eid)['value'],'7')
+        self.assertIsNone(main.get_setting('reminder_enabled'))
+        self.assertEqual(main.periods(),[])
+        self.assertEqual(self.calls_to(MASHA),[])
+
 
 class AccountStorageTests(unittest.TestCase):
     def test_files_persist_separately_and_main_is_preserved(self):
@@ -193,3 +241,28 @@ class AccountStorageTests(unittest.TestCase):
             link=Path(folder)/'alias.sqlite3'
             link.symlink_to(path)
             with self.assertRaises(ValueError): DiaryStores(path,link)
+
+    def test_upgrade_existing_event_database_preserves_author_and_undo(self):
+        import sqlite3
+        import json
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'diary.sqlite3'
+            db=sqlite3.connect(path)
+            db.execute('CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT, time TEXT, kind TEXT, value TEXT)')
+            db.execute("INSERT INTO events(day,time,kind,value) VALUES ('2026-01-01','10:00','Секс','Да')")
+            db.execute('CREATE TABLE history(id INTEGER PRIMARY KEY AUTOINCREMENT,label TEXT,snapshot TEXT)')
+            snapshot={'events':[{'id':1,'day':'2026-01-01','time':'10:00','kind':'Секс','value':'Да'}],'periods':[]}
+            db.execute('INSERT INTO history(label,snapshot) VALUES (?,?)',('старое действие',json.dumps(snapshot)))
+            db.commit()
+            db.close()
+            stores=DiaryStores(path)
+            main=stores.for_user(MASHA)
+            self.assertEqual(main.event(1)['value'],'Да')
+            main.undo(main.last_action()['id'])
+            self.assertIsNone(main.event(1)['author_id'])
+            eid=main.add('2026-01-01','Близость','Да',author_id=PARTNER)
+            stores.close()
+            stores=DiaryStores(path)
+            self.assertEqual(stores.for_user(MASHA).event(eid)['author_id'],PARTNER)
+            self.assertEqual(stores.for_user(TEST_USER).events('2026-01-01'),[])
+            stores.close()
